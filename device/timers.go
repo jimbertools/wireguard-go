@@ -103,14 +103,14 @@ func expiredRetransmitHandshake(peer *Peer) {
 		/* We clear the endpoint address src address, in case this is the cause of trouble. */
 		peer.markEndpointSrcForClearing()
 
-		// On Windows, handshake failures often indicate routing issues that require network rebind
-		if runtime.GOOS == "windows" {
+		// On Windows, perform a synchronous bind update before sending the retransmit so the
+		// new socket is already open when the peer's response arrives. Only do this on the first
+		// retry to avoid the overhead on every subsequent attempt within the same failure cycle.
+		if runtime.GOOS == "windows" && peer.timers.handshakeAttempts.Load() == 1 {
 			peer.device.log.Verbosef("%s - Windows: Forcing bind update due to handshake failure", peer)
-			go func() {
-				if err := peer.device.BindUpdate(); err != nil {
-					peer.device.log.Errorf("Failed to update bind after handshake failure: %v", err)
-				}
-			}()
+			if err := peer.device.BindUpdate(); err != nil {
+				peer.device.log.Errorf("Failed to update bind after handshake failure: %v", err)
+			}
 		}
 
 		peer.SendHandshakeInitiation(true)
