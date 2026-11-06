@@ -401,7 +401,10 @@ retry:
 	// We limit the MTU well below the 65k max for practicality, but this means a remote host can still send us
 	// huge packets. Just try again when this happens. The infinite loop this could cause is still limited to
 	// attacker bandwidth, just like the rest of the receive path.
-	if windows.Errno(results[0].Status) == windows.WSAEMSGSIZE {
+	// ICMP errors describe a failed datagram/destination, not a failed socket.
+	// Keep receiving traffic from other peers instead of stopping the shared loop.
+	switch windows.Errno(results[0].Status) {
+	case windows.WSAEMSGSIZE, windows.WSAECONNRESET, windows.WSAENETRESET:
 		if isOpen.Load() != 1 {
 			return 0, nil, net.ErrClosed
 		}
