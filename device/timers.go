@@ -103,18 +103,44 @@ func expiredRetransmitHandshake(peer *Peer) {
 		/* We clear the endpoint address src address, in case this is the cause of trouble. */
 		peer.markEndpointSrcForClearing()
 
-		// On Windows, perform a synchronous bind update before sending the retransmit so the
-		// new socket is already open when the peer's response arrives. Only do this on the first
-		// retry to avoid the overhead on every subsequent attempt within the same failure cycle.
+		// Rebind before the first Windows retry, but outside the timer callback:
+		// peer removal holds device.peers while waiting for this timer to finish,
+		// and BindUpdate needs device.peers too.
 		if runtime.GOOS == "windows" && peer.timers.handshakeAttempts.Load() == 1 {
-			peer.device.log.Verbosef("%s - Windows: Forcing bind update due to handshake failure", peer)
-			if err := peer.device.BindUpdate(); err != nil {
-				peer.device.log.Errorf("Failed to update bind after handshake failure: %v", err)
-			}
+			peer.rebindAndRetryHandshake()
+			return
 		}
 
 		peer.SendHandshakeInitiation(true)
 	}
+}
+
+func (peer *Peer) rebindAndRetryHandshake() {
+	go func() {
+		device := peer.device
+		// Use the same lock order as Close. Serialize deferred recovery with
+		// device shutdown and UAPI changes, without keeping the timer running.
+		device.state.Lock()
+		defer device.state.Unlock()
+		device.ipcMutex.Lock()
+		defer device.ipcMutex.Unlock()
+		if !peer.timersActive() || peer.timers.handshakeAttempts.Load() != 1 {
+			return
+		}
+
+		device.log.Verbosef("%s - Windows: Forcing bind update due to handshake failure", peer)
+		if err := device.BindUpdate(); err != nil {
+			device.log.Errorf("Failed to update bind after handshake failure: %v", err)
+		}
+
+		// Take the peer lock only after BindUpdate has released its locks.
+		// A peer removed while rebinding must not start another handshake.
+		peer.state.Lock()
+		defer peer.state.Unlock()
+		if peer.timersActive() && peer.timers.handshakeAttempts.Load() == 1 {
+			peer.SendHandshakeInitiation(true)
+		}
+	}()
 }
 
 func expiredSendKeepalive(peer *Peer) {
